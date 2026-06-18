@@ -1,10 +1,14 @@
-# nwu — Novel Wiping Utility
+<div align="center">
+   
+<a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
 ![version](https://img.shields.io/badge/version-1.1.0-blue)
 ![language](https://img.shields.io/badge/language-C-00599C?logo=c)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-green)
+
+</div>
 
 SSD-aware secure delete and free-space wipe, in C. Runs as an **interactive
 menu** or from the **command line** for scripting. The novel point is that it
