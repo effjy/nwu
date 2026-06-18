@@ -60,12 +60,13 @@
 #include <linux/falloc.h>
 #endif
 
-#define NWU_VERSION "1.1.0"
+#define NWU_VERSION "1.2.0"
 #define BUFSZ (1u << 20)   /* 1 MiB I/O buffer */
 
 static int g_passes = 1;
 static int g_verbose = 0;
 static int g_do_trim = 1;
+static int g_verify  = 0;   /* -c: read-back verification after overwrite */
 
 static void vlog(const char *fmt, ...)
 {
@@ -311,6 +312,50 @@ static int overwrite_pass(int fd, off_t size, unsigned char *buf)
     return fdatasync(fd);
 }
 
+/* Read-back verification (DoD 5200.28 style "last pass verify"): write a known
+ * pattern (zeros), flush it to the device, drop the cache, then read it back and
+ * confirm every byte landed. Proves the sectors are actually writable and that
+ * the final on-device state is what we intended - not just dirtied in RAM.
+ * Returns 0 on success, -1 on I/O error, 1 on a verification MISMATCH. */
+static int verify_pass(int fd, off_t size, unsigned char *buf)
+{
+    /* write the known pattern */
+    if (lseek(fd, 0, SEEK_SET) < 0) return -1;
+    memset(buf, 0, BUFSZ);
+    off_t left = size;
+    while (left > 0) {
+        size_t chunk = (left < (off_t)BUFSZ) ? (size_t)left : BUFSZ;
+        size_t w = 0;
+        while (w < chunk) {
+            ssize_t k = write(fd, buf + w, chunk - w);
+            if (k < 0) { if (errno == EINTR) continue; return -1; }
+            w += (size_t)k;
+        }
+        left -= (off_t)chunk;
+    }
+    if (fdatasync(fd) < 0) return -1;
+    /* evict the page cache so the read comes from the device, not RAM */
+    posix_fadvise(fd, 0, size, POSIX_FADV_DONTNEED);
+
+    /* read it back and confirm */
+    if (lseek(fd, 0, SEEK_SET) < 0) return -1;
+    left = size;
+    while (left > 0) {
+        size_t chunk = (left < (off_t)BUFSZ) ? (size_t)left : BUFSZ;
+        size_t r = 0;
+        while (r < chunk) {
+            ssize_t k = read(fd, buf + r, chunk - r);
+            if (k < 0) { if (errno == EINTR) continue; return -1; }
+            if (k == 0) return 1;                 /* short file: cannot confirm */
+            r += (size_t)k;
+        }
+        for (size_t i = 0; i < chunk; i++)
+            if (buf[i] != 0) return 1;            /* a byte did not stick */
+        left -= (off_t)chunk;
+    }
+    return 0;
+}
+
 /* Derive the parent directory of path into dir[dirsz] ("." / "/" handled). */
 static void parent_dir(const char *path, char *dir, size_t dirsz)
 {
@@ -408,6 +453,21 @@ static int wipe_one_file(const char *path)
         if (overwrite_pass(fd, wsize, buf) < 0) {
             fprintf(stderr, "nwu: overwrite %s: %s\n", path, strerror(errno));
             rc = -1; break;
+        }
+    }
+
+    if (rc == 0 && g_verify && wsize > 0) {
+        vlog("  %s: verifying (read-back)\n", path);
+        int v = verify_pass(fd, wsize, buf);
+        if (v < 0) {
+            fprintf(stderr, "nwu: verify %s: %s\n", path, strerror(errno));
+            rc = -1;
+        } else if (v > 0) {
+            fprintf(stderr, "nwu: VERIFY FAILED: %s - data did not land on the "
+                            "device as written\n", path);
+            rc = -1;
+        } else {
+            vlog("  %s: verified OK\n", path);
         }
     }
     locked_free(buf, BUFSZ);
@@ -681,8 +741,9 @@ static void interactive(void)
         printf("  1) Wipe a file\n");
         printf("  2) Wipe a directory (recursive)\n");
         printf("  3) Wipe free space on a mountpoint\n");
-        printf("  4) Settings (passes=%d, trim=%s, verbose=%s)\n",
-               g_passes, g_do_trim ? "on" : "off", g_verbose ? "on" : "off");
+        printf("  4) Settings (passes=%d, trim=%s, verify=%s, verbose=%s)\n",
+               g_passes, g_do_trim ? "on" : "off", g_verify ? "on" : "off",
+               g_verbose ? "on" : "off");
         printf("  5) Quit\n");
         printf("Choose: ");
         fflush(stdout);
@@ -710,6 +771,7 @@ static void interactive(void)
             read_line(line, sizeof line);
             if (line[0]) { int p = atoi(line); if (p >= 1) g_passes = p; }
             g_do_trim = confirm("Enable filesystem TRIM?");
+            g_verify  = confirm("Verify overwrite by reading it back?");
             g_verbose = confirm("Enable verbose output?");
         } else if (!strcmp(line, "5") || !strcmp(line, "q") || !line[0]) {
             return;
@@ -734,6 +796,7 @@ static void usage(const char *p)
 "Options:\n"
 "  -p N   overwrite passes (default 1; >1 helps only on HDDs)\n"
 "  -T     skip the filesystem TRIM step\n"
+"  -c     verify the overwrite by reading it back (per-file; slower)\n"
 "  -v     verbose\n"
 "  -V     print version\n"
 "  -h     help\n\n"
@@ -748,10 +811,11 @@ int main(int argc, char **argv)
     harden_process();   /* no coredumps; non-fatal best-effort */
 
     int opt;
-    while ((opt = getopt(argc, argv, "p:TvVh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:TcvVh")) != -1) {
         switch (opt) {
         case 'p': g_passes = atoi(optarg); if (g_passes < 1) g_passes = 1; break;
         case 'T': g_do_trim = 0; break;
+        case 'c': g_verify = 1; break;
         case 'v': g_verbose = 1; break;
         case 'V': printf("nwu " NWU_VERSION "\n"); return 0;
         case 'h': usage(argv[0]); return 0;

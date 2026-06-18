@@ -2,7 +2,7 @@
    
 <a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
-![version](https://img.shields.io/badge/version-1.1.0-blue)
+![version](https://img.shields.io/badge/version-1.2.0-blue)
 ![language](https://img.shields.io/badge/language-C-00599C?logo=c)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
@@ -105,7 +105,7 @@ sudo make install          # installs to /usr/local/bin/nwu (on $PATH)
 
 Verify:
 ```sh
-nwu -V                     # -> nwu 1.1.0
+nwu -V                     # -> nwu 1.2.0
 ```
 
 Uninstall / clean:
@@ -131,8 +131,8 @@ nwu
 Command line (for scripts):
 
 ```sh
-nwu [-p N] [-T] [-v] wipe <path>...      # secure-delete file(s) and/or dir tree(s)
-nwu [-p N] [-T] [-v] free <mountpoint>   # fill & wipe free space, then TRIM
+nwu [-p N] [-T] [-c] [-v] wipe <path>...   # secure-delete file(s) and/or dir tree(s)
+nwu [-p N] [-T] [-v] free <mountpoint>     # fill & wipe free space, then TRIM
 ```
 
 **Options**
@@ -141,6 +141,7 @@ nwu [-p N] [-T] [-v] free <mountpoint>   # fill & wipe free space, then TRIM
 | ------ | ------- |
 | `-p N` | Overwrite passes (default `1`; more passes only help on HDDs, not SSDs). |
 | `-T`   | Skip the filesystem TRIM (`FITRIM`) step. |
+| `-c`   | Verify the overwrite by reading it back (per-file; slower). |
 | `-v`   | Verbose output. |
 | `-V`   | Print version and exit. |
 | `-h`   | Show help. |
@@ -159,6 +160,9 @@ sudo nwu free /media/usb
 
 # Overwrite 3 times, verbose, no TRIM
 sudo nwu -p 3 -v -T wipe ./sensitive.db
+
+# Overwrite, then read it back to confirm the data actually landed
+sudo nwu -c wipe ~/secret.key
 ```
 
 `FITRIM` needs **root** and a discard-capable filesystem/stack. If discard is
@@ -172,6 +176,13 @@ TRIM step is skipped, which it reports in verbose mode.
 > instantly renders the *whole* device unrecoverable.
 
 ## Changelog
+
+**1.2.0**
+- Add opt-in **read-back verification** (`-c`): after overwriting a file, write a
+  known pattern, flush it, drop the page cache (`POSIX_FADV_DONTNEED`) and read
+  it back to confirm every byte actually landed on the device (DoD 5200.28-style
+  last-pass verify). Off by default; reports `VERIFY FAILED` if a write was
+  silently dropped.
 
 **1.1.0**
 - Overwrite is now rounded up to the filesystem block size, erasing the slack at
@@ -219,3 +230,4 @@ not-yet-GC'd pages are outside OS reach. For a hard guarantee use the drive's
 own `ATA Secure Erase` / NVMe Format (`hdparm --security-erase`, `nvme format
 --ses=1`) on the whole device. `nwu` is the best-effort, per-file / free-space
 approach for a mounted, in-use system.
+
