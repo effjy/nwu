@@ -17,7 +17,7 @@ operation, instead of relying on either alone.
 
 ## Screenshot
 
-![nwu in action](screenshot.png)
+![nwu in action](screenshot1.png)
 
 ## Why overwriting alone fails on SSDs
 
