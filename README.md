@@ -13,7 +13,6 @@ operation, instead of relying on either alone.
 
 ## Screenshot
 
-<!-- Take a screenshot of nwu running and save it as screenshot.png next to this README. -->
 ![nwu in action](screenshot.png)
 
 ## Why overwriting alone fails on SSDs
