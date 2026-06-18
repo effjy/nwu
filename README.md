@@ -2,7 +2,7 @@
    
 <a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
-![version](https://img.shields.io/badge/version-1.2.0-blue)
+![version](https://img.shields.io/badge/version-1.4.0-blue)
 ![language](https://img.shields.io/badge/language-C-00599C?logo=c)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
@@ -17,7 +17,7 @@ operation, instead of relying on either alone.
 
 ## Screenshot
 
-![nwu in action](screenshot1.png)
+![nwu in action](screenshot.png)
 
 ## Why overwriting alone fails on SSDs
 
@@ -105,7 +105,7 @@ sudo make install          # installs to /usr/local/bin/nwu (on $PATH)
 
 Verify:
 ```sh
-nwu -V                     # -> nwu 1.2.0
+nwu -V                     # -> nwu 1.4.0
 ```
 
 Uninstall / clean:
@@ -131,8 +131,9 @@ nwu
 Command line (for scripts):
 
 ```sh
-nwu [-p N] [-T] [-c] [-v] wipe <path>...   # secure-delete file(s) and/or dir tree(s)
-nwu [-p N] [-T] [-v] free <mountpoint>     # fill & wipe free space, then TRIM
+nwu [-p N] [-T] [-c] [-v] wipe   <path>...    # secure-delete file(s) and/or dir tree(s)
+nwu [-p N] [-T] [-v]      free   <mountpoint> # fill & wipe free space, then TRIM
+nwu [-p N] [-T] [-c] [-y] device <blockdev>   # wipe a WHOLE device + BLKDISCARD (root)
 ```
 
 **Options**
@@ -140,8 +141,11 @@ nwu [-p N] [-T] [-v] free <mountpoint>     # fill & wipe free space, then TRIM
 | Option | Meaning |
 | ------ | ------- |
 | `-p N` | Overwrite passes (default `1`; more passes only help on HDDs, not SSDs). |
-| `-T`   | Skip the filesystem TRIM (`FITRIM`) step. |
-| `-c`   | Verify the overwrite by reading it back (per-file; slower). |
+| `-T`   | Skip the filesystem TRIM / device-discard step. |
+| `-c`   | Verify the overwrite by reading it back (slower). |
+| `-y`   | Skip the typed confirmation for `device` wipes (**dangerous**; for scripts). |
+| `--secure-erase` | After a `device` wipe, issue the drive's **firmware secure erase** — native NVMe Format, or ATA Secure Erase via `hdparm` for SATA. |
+| `--crypto-erase` | Like `--secure-erase` but request a **cryptographic** erase (destroys the drive's internal encryption key — near-instant on SEDs). |
 | `-v`   | Verbose output. |
 | `-V`   | Print version and exit. |
 | `-h`   | Show help. |
@@ -163,7 +167,21 @@ sudo nwu -p 3 -v -T wipe ./sensitive.db
 
 # Overwrite, then read it back to confirm the data actually landed
 sudo nwu -c wipe ~/secret.key
+
+# Wipe a whole UNMOUNTED device: overwrite (O_DIRECT) + BLKDISCARD, then it
+# prints the firmware secure-erase command for a hard guarantee
+sudo nwu device /dev/sdb            # prompts you to type the device path
+sudo nwu -y -c device /dev/sdb      # no prompt + verify (for scripts)
+
+# Overwrite + discard, THEN have the drive run its own firmware secure erase
+sudo nwu --secure-erase device /dev/nvme0n1   # native NVMe Format (SES=1)
+sudo nwu --crypto-erase device /dev/nvme0n1   # cryptographic erase (SES=2)
+sudo nwu --secure-erase device /dev/sdb       # SATA: ATA Secure Erase via hdparm
 ```
+
+> **⚠ `device` erases the entire block device.** It refuses if the device (or any
+> of its partitions) is mounted, and — unless you pass `-y` — makes you type the
+> exact device path to confirm. Double-check with `lsblk` first.
 
 `FITRIM` needs **root** and a discard-capable filesystem/stack. If discard is
 unavailable (an HDD, a VM disk, or an encrypted volume like LUKS mounted without
@@ -176,6 +194,27 @@ TRIM step is skipped, which it reports in verbose mode.
 > instantly renders the *whole* device unrecoverable.
 
 ## Changelog
+
+**1.4.0**
+- `--secure-erase` / `--crypto-erase` now **issue the drive's firmware erase**
+  after a `device` wipe — the only hard guarantee on an SSD (reaches
+  over-provisioned and remapped pages). NVMe uses a **native Format NVM** admin
+  command (no external dependency); SATA drives use **ATA Secure Erase via
+  `hdparm`**. Failures (e.g. an ATA `frozen` drive, or `hdparm` missing) are
+  reported and fall back to printing the manual command. Also available from the
+  interactive device menu.
+
+**1.3.0**
+- New **`device` subcommand** — wipe a whole block device (`/dev/sdX`): a
+  non-compressible overwrite of every sector followed by `BLKDISCARD` over the
+  entire device, then it prints the drive's **firmware secure-erase** command
+  (`nvme format --ses=1` or `hdparm --security-erase`) for the only hard
+  guarantee on an SSD. Safety: refuses mounted devices, and requires you to type
+  the device path to confirm (or `-y` to skip for scripts). Honors `-p`/`-c`.
+- **`O_DIRECT`** for the big sequential targets (free-space fills and device
+  wipes): writes bypass the page cache so bytes go straight to the device with
+  steadier throughput and no cache pollution; falls back transparently on
+  filesystems that don't support it.
 
 **1.2.0**
 - Add opt-in **read-back verification** (`-c`): after overwriting a file, write a

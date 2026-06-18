@@ -35,6 +35,7 @@
  */
 
 #define _GNU_SOURCE
+#define _FILE_OFFSET_BITS 64    /* 64-bit off_t for whole-device offsets */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -54,19 +55,30 @@
 #include <sys/resource.h>  /* setrlimit, RLIMIT_CORE */
 #include <sys/mman.h>      /* mlock, munlock */
 #include <sys/prctl.h>     /* prctl, PR_SET_DUMPABLE */
-#include <linux/fs.h>      /* FITRIM, struct fstrim_range */
+#include <sys/wait.h>      /* waitpid (hdparm for ATA secure erase) */
+#include <getopt.h>        /* getopt_long for --secure-erase */
+#include <linux/fs.h>      /* FITRIM, BLKDISCARD, BLKGETSIZE64 */
 
 #ifndef FALLOC_FL_PUNCH_HOLE
 #include <linux/falloc.h>
 #endif
 
-#define NWU_VERSION "1.2.0"
+#ifdef __has_include
+#  if __has_include(<linux/nvme_ioctl.h>)
+#    include <linux/nvme_ioctl.h>   /* native NVMe Format secure erase */
+#    define NWU_HAVE_NVME 1
+#  endif
+#endif
+
+#define NWU_VERSION "1.4.0"
 #define BUFSZ (1u << 20)   /* 1 MiB I/O buffer */
 
 static int g_passes = 1;
 static int g_verbose = 0;
 static int g_do_trim = 1;
 static int g_verify  = 0;   /* -c: read-back verification after overwrite */
+static int g_assume_yes = 0;/* -y: skip the typed device-wipe confirmation */
+static int g_secure_erase = 0; /* 0 none, 1 user-data erase, 2 crypto erase */
 
 static void vlog(const char *fmt, ...)
 {
@@ -255,6 +267,32 @@ static void locked_free(unsigned char *p, size_t n)
     if (!p) return;
     munlock(p, n);
     free(p);
+}
+
+/* Block-aligned allocation for O_DIRECT (freed with locked_free). */
+static unsigned char *aligned_locked_alloc(size_t n, size_t align)
+{
+    void *p = NULL;
+    if (posix_memalign(&p, align, n) != 0) return NULL;
+    if (mlock(p, n) < 0)
+        vlog("  mlock(%zu): %s (non-fatal)\n", n, strerror(errno));
+    return (unsigned char *)p;
+}
+
+/* Switch fd to O_DIRECT so writes bypass the page cache and go straight to the
+ * device (not just dirtied in RAM): steadier throughput and no cache pollution
+ * on multi-GB fills. Returns 1 on success, 0 if the fs doesn't support it. */
+static int try_set_odirect(int fd)
+{
+    int fl = fcntl(fd, F_GETFL);
+    if (fl < 0) return 0;
+    return fcntl(fd, F_SETFL, fl | O_DIRECT) == 0;
+}
+
+static void clear_odirect(int fd)
+{
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_DIRECT);
 }
 
 /* --------------------------------------------------------------------- trim */
@@ -630,7 +668,7 @@ static int wipe_freespace(const char *mount)
     unsigned long long avail =
         (unsigned long long)(as_root ? vfs.f_bfree : vfs.f_bavail) * vfs.f_frsize;
 
-    unsigned char *buf = locked_alloc(BUFSZ);
+    unsigned char *buf = aligned_locked_alloc(BUFSZ, 4096);
     if (!buf) return -1;
 
     /* Hold every fill file's fd open so its blocks stay occupied until we are
@@ -646,6 +684,12 @@ static int wipe_freespace(const char *mount)
         free(fds); locked_free(buf, BUFSZ); return -1;
     }
     fds[nfds++] = fd;
+
+    /* Bypass the page cache so bytes go straight to the device and a multi-GB
+     * fill doesn't evict everything else from RAM. Not all filesystems support
+     * it (tmpfs/overlay); fall back transparently if not. */
+    int odirect = try_set_odirect(fd);
+    vlog("  free-space: O_DIRECT %s\n", odirect ? "enabled" : "unavailable");
 
     struct termios saved;
     int raw = tty_raw_on(&saved);
@@ -665,6 +709,9 @@ static int wipe_freespace(const char *mount)
         if (k < 0) {
             if (errno == ENOSPC) break;
             if (errno == EINTR) continue;
+            if (errno == EINVAL && odirect) {     /* O_DIRECT alignment refused */
+                clear_odirect(fd); odirect = 0; continue;
+            }
             if (errno == EFBIG) {                 /* this file is maxed out */
                 fdatasync(fd);
                 if (nfds >= MAXFILES) break;
@@ -678,6 +725,7 @@ static int wipe_freespace(const char *mount)
                 }
                 fds[nfds++] = nf;
                 fd = nf;
+                if (odirect) try_set_odirect(fd);  /* same mode on the new file */
                 continue;
             }
             fprintf(stderr, "\nnwu: write: %s\n", strerror(errno));
@@ -715,6 +763,268 @@ static int wipe_freespace(const char *mount)
     return rc;
 }
 
+/* ------------------------------------------------------ block-device wiping */
+
+static void read_line(char *buf, size_t n);   /* defined below */
+
+/* Whole-device size (bytes) and logical block size, via block ioctls. */
+static int blockdev_geom(int fd, unsigned long long *size, unsigned *bsz)
+{
+    uint64_t sz = 0;
+    int ss = 0;
+    if (ioctl(fd, BLKGETSIZE64, &sz) < 0) return -1;
+    if (ioctl(fd, BLKSSZGET, &ss) < 0 || ss <= 0) ss = 512;
+    *size = sz;
+    *bsz = (unsigned)ss;
+    return 0;
+}
+
+/* Refuse if the device (or one of its partitions) is currently mounted. */
+static int device_in_use(const char *dev)
+{
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return 0;
+    size_t dl = strlen(dev);
+    char line[8192], src[4096];
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%4095s", src) == 1 && strncmp(src, dev, dl) == 0) {
+            found = 1; break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Tell the operator the firmware-level secure-erase command for their drive.
+ * nwu does NOT run it: wrong state (e.g. ATA "frozen") or wrong device can
+ * brick a drive, so the human stays in the loop. */
+static void print_secure_erase_hint(const char *dev)
+{
+    const char *base = strrchr(dev, '/');
+    base = base ? base + 1 : dev;
+    printf("\nnwu: overwrite + discard done. The ONLY hard guarantee on an SSD\n"
+           "     (reaching over-provisioned / remapped pages nwu cannot address)\n"
+           "     is the drive's own firmware secure erase:\n");
+    if (strncmp(base, "nvme", 4) == 0)
+        printf("       sudo nvme format %s --ses=1     # or --ses=2 (crypto erase)\n",
+               dev);
+    else
+        printf("       sudo hdparm --user-master u --security-set-pass p %s\n"
+               "       sudo hdparm --user-master u --security-erase    p %s\n"
+               "     (if reported 'frozen', suspend/resume the machine, then retry)\n",
+               dev, dev);
+    printf("     nwu does not run these for you - wrong device/state can brick a drive.\n");
+}
+
+/* Run an external command, return 0 on exit status 0. Used for hdparm. */
+static int run_cmd(const char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) { execvp(argv[0], (char *const *)argv); _exit(127); }
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+/* Native NVMe Format with secure-erase setting (no external dependency).
+ * SES: 1 = user-data erase, 2 = cryptographic erase. */
+static int nvme_secure_erase(int fd, int crypto)
+{
+#ifdef NWU_HAVE_NVME
+    int nsid = ioctl(fd, NVME_IOCTL_ID);
+    if (nsid <= 0) nsid = 0xffffffff;            /* broadcast to all namespaces */
+    struct nvme_admin_cmd cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.opcode = 0x80;                           /* Format NVM */
+    cmd.nsid   = (unsigned)nsid;
+    cmd.cdw10  = ((unsigned)(crypto ? 2 : 1) & 0x7u) << 9;   /* SES field */
+    cmd.timeout_ms = 600000;                     /* format can take minutes */
+    return ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+#else
+    (void)fd; (void)crypto;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+/* ATA Secure Erase via hdparm (it handles the password handshake correctly). */
+static int sata_secure_erase(const char *dev)
+{
+    const char *set[] = { "hdparm", "--user-master", "u",
+                          "--security-set-pass", "p", dev, NULL };
+    const char *era[] = { "hdparm", "--user-master", "u",
+                          "--security-erase", "p", dev, NULL };
+    printf("nwu: setting a temporary ATA password via hdparm...\n");
+    if (run_cmd(set) != 0) {
+        fprintf(stderr, "nwu: hdparm set-pass failed (drive 'frozen', hdparm "
+                        "missing, or not root)\n");
+        return -1;
+    }
+    printf("nwu: issuing ATA SECURITY ERASE (this can take a while)...\n");
+    if (run_cmd(era) != 0) {
+        fprintf(stderr, "nwu: hdparm security-erase failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Dispatch firmware secure erase by device family. fd is the open device. */
+static int do_secure_erase(const char *dev, int fd, int crypto)
+{
+    const char *base = strrchr(dev, '/');
+    base = base ? base + 1 : dev;
+    printf("nwu: requesting firmware %s erase on %s...\n",
+           crypto ? "CRYPTOGRAPHIC" : "user-data", dev);
+    if (strncmp(base, "nvme", 4) == 0) {
+        if (nvme_secure_erase(fd, crypto) != 0) {
+            fprintf(stderr, "nwu: NVMe format failed: %s\n", strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+    return sata_secure_erase(dev);   /* SATA/ATA path (crypto n/a, full erase) */
+}
+
+static int confirm_device(const char *dev, unsigned long long size)
+{
+    char sh[32]; human((double)size, sh, sizeof sh);
+    printf("\n*** DESTRUCTIVE: this ERASES THE ENTIRE DEVICE ***\n");
+    printf("    %s  (%s)\n", dev, sh);
+    if (g_assume_yes) { printf("    (-y given: proceeding without prompt)\n"); return 1; }
+    if (!isatty(STDIN_FILENO)) {
+        fprintf(stderr, "nwu: refusing un-confirmed device wipe on a non-TTY; "
+                        "pass -y to force.\n");
+        return 0;
+    }
+    char b[4096];
+    printf("    Type the device path to confirm: ");
+    fflush(stdout);
+    read_line(b, sizeof b);
+    return strcmp(b, dev) == 0;
+}
+
+/* Overwrite a whole block device (O_DIRECT) + BLKDISCARD + secure-erase hint. */
+static int wipe_device(const char *dev)
+{
+    struct stat st;
+    if (stat(dev, &st) < 0) {
+        fprintf(stderr, "nwu: %s: %s\n", dev, strerror(errno));
+        return -1;
+    }
+    if (!S_ISBLK(st.st_mode)) {
+        fprintf(stderr, "nwu: %s is not a block device\n", dev);
+        return -1;
+    }
+    if (device_in_use(dev)) {
+        fprintf(stderr, "nwu: %s (or a partition of it) is mounted - unmount "
+                        "first, refusing.\n", dev);
+        return -1;
+    }
+
+    int fd = open(dev, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "nwu: open %s: %s (need root)\n", dev, strerror(errno));
+        return -1;
+    }
+
+    unsigned long long size; unsigned bsz;
+    if (blockdev_geom(fd, &size, &bsz) < 0) {
+        fprintf(stderr, "nwu: %s: cannot get device size: %s\n",
+                dev, strerror(errno));
+        close(fd); return -1;
+    }
+
+    if (!confirm_device(dev, size)) {
+        printf("nwu: cancelled.\n");
+        close(fd); return -1;
+    }
+
+    size_t align = bsz < 512 ? 512 : bsz;
+    unsigned char *buf = aligned_locked_alloc(BUFSZ, align);
+    if (!buf) { close(fd); return -1; }
+
+    int odirect = try_set_odirect(fd);
+    vlog("  device: O_DIRECT %s, block size %u\n",
+         odirect ? "enabled" : "unavailable", bsz);
+
+    struct termios saved;
+    int raw = tty_raw_on(&saved);
+    char sh[32]; human((double)size, sh, sizeof sh);
+    printf("nwu: wiping device %s (%s)%s\n", dev, sh,
+           raw ? "  [press 's' to stop]" : "");
+
+    int rc = 0, stopped = 0;
+    for (int pass = 0; pass < g_passes && !stopped && rc == 0; pass++) {
+        if (lseek(fd, 0, SEEK_SET) < 0) { rc = -1; break; }
+        unsigned long long done = 0;
+        double start = now_sec(), last = start;
+        while (done < size) {
+            if (raw && stop_requested()) { stopped = 1; break; }
+            size_t chunk = (size - done) < BUFSZ ? (size_t)(size - done) : BUFSZ;
+            if (rng_fill(buf, chunk) < 0) { rc = -1; break; }
+            size_t w = 0;
+            while (w < chunk) {
+                ssize_t k = write(fd, buf + w, chunk - w);
+                if (k < 0) {
+                    if (errno == EINTR) continue;
+                    if (errno == EINVAL && odirect) {
+                        clear_odirect(fd); odirect = 0; continue;
+                    }
+                    fprintf(stderr, "\nnwu: write %s: %s\n", dev, strerror(errno));
+                    rc = -1; break;
+                }
+                w += (size_t)k;
+            }
+            if (rc) break;
+            done += chunk;
+            double t = now_sec();
+            if (t - last >= 0.1) { draw_progress(done, size, t - start); last = t; }
+        }
+        draw_progress(done, size, now_sec() - start);
+        fputc('\n', stderr);
+        fdatasync(fd);
+        if (rc == 0 && !stopped)
+            vlog("  device pass %d/%d complete\n", pass + 1, g_passes);
+    }
+    if (raw) tty_raw_off(&saved);
+
+    if (rc == 0 && !stopped && g_verify) {
+        printf("nwu: verifying device (read-back)...\n");
+        int v = verify_pass(fd, (off_t)size, buf);
+        if (v < 0) { fprintf(stderr, "nwu: verify %s: %s\n", dev, strerror(errno)); rc = -1; }
+        else if (v > 0) { fprintf(stderr, "nwu: VERIFY FAILED on %s\n", dev); rc = -1; }
+        else printf("nwu: device verified OK\n");
+    }
+    locked_free(buf, BUFSZ);
+
+    if (g_do_trim) {
+        uint64_t range[2] = { 0, size };
+        if (ioctl(fd, BLKDISCARD, &range) < 0)
+            vlog("  BLKDISCARD(%s): %s (device may not support discard)\n",
+                 dev, strerror(errno));
+        else
+            printf("nwu: issued BLKDISCARD over the whole device\n");
+    }
+
+    int erased = 0;
+    if (g_secure_erase && !stopped) {
+        if (do_secure_erase(dev, fd, g_secure_erase == 2) == 0) {
+            printf("nwu: firmware secure erase completed.\n");
+            erased = 1;
+        } else {
+            fprintf(stderr, "nwu: firmware secure erase did not run "
+                            "(see guidance below).\n");
+        }
+    }
+    close(fd);
+
+    if (stopped) printf("nwu: stopped by user (device only partially overwritten).\n");
+    if (!erased) print_secure_erase_hint(dev);   /* fall back to manual guidance */
+    return rc;
+}
+
 /* ----------------------------------------------------------- interactive */
 
 static void read_line(char *buf, size_t n)
@@ -741,10 +1051,11 @@ static void interactive(void)
         printf("  1) Wipe a file\n");
         printf("  2) Wipe a directory (recursive)\n");
         printf("  3) Wipe free space on a mountpoint\n");
-        printf("  4) Settings (passes=%d, trim=%s, verify=%s, verbose=%s)\n",
+        printf("  4) Wipe a whole block device (e.g. /dev/sdX)\n");
+        printf("  5) Settings (passes=%d, trim=%s, verify=%s, verbose=%s)\n",
                g_passes, g_do_trim ? "on" : "off", g_verify ? "on" : "off",
                g_verbose ? "on" : "off");
-        printf("  5) Quit\n");
+        printf("  6) Quit\n");
         printf("Choose: ");
         fflush(stdout);
         read_line(line, sizeof line);
@@ -766,14 +1077,25 @@ static void interactive(void)
                 wipe_freespace(line);
             else printf("nwu: cancelled.\n");
         } else if (!strcmp(line, "4")) {
+            printf("Block device (e.g. /dev/sdb): ");
+            fflush(stdout);
+            read_line(line, sizeof line);
+            if (!line[0]) continue;
+            g_secure_erase = 0;
+            if (confirm("Also issue the drive's FIRMWARE secure erase afterward?"))
+                g_secure_erase = confirm("Use cryptographic erase (else user-data)?")
+                                 ? 2 : 1;
+            wipe_device(line);          /* asks its own typed confirmation */
+            g_secure_erase = 0;
+        } else if (!strcmp(line, "5")) {
             printf("Overwrite passes [%d]: ", g_passes);
             fflush(stdout);
             read_line(line, sizeof line);
             if (line[0]) { int p = atoi(line); if (p >= 1) g_passes = p; }
-            g_do_trim = confirm("Enable filesystem TRIM?");
+            g_do_trim = confirm("Enable filesystem TRIM / device discard?");
             g_verify  = confirm("Verify overwrite by reading it back?");
             g_verbose = confirm("Enable verbose output?");
-        } else if (!strcmp(line, "5") || !strcmp(line, "q") || !line[0]) {
+        } else if (!strcmp(line, "6") || !strcmp(line, "q") || !line[0]) {
             return;
         } else {
             printf("nwu: unknown choice.\n");
@@ -791,32 +1113,46 @@ static void usage(const char *p)
 "Interactive:\n"
 "  %s                                 launch the menu\n\n"
 "Scripting:\n"
-"  %s [opts] wipe <path>...           wipe file(s) and/or directory tree(s)\n"
-"  %s [opts] free <mountpoint>        wipe free space, then TRIM\n\n"
+"  %s [opts] wipe   <path>...         wipe file(s) and/or directory tree(s)\n"
+"  %s [opts] free   <mountpoint>      wipe free space, then TRIM\n"
+"  %s [opts] device <blockdev>        wipe a WHOLE device + BLKDISCARD (root)\n\n"
 "Options:\n"
 "  -p N   overwrite passes (default 1; >1 helps only on HDDs)\n"
-"  -T     skip the filesystem TRIM step\n"
-"  -c     verify the overwrite by reading it back (per-file; slower)\n"
+"  -T     skip the TRIM / device-discard step\n"
+"  -c     verify the overwrite by reading it back (slower)\n"
+"  -y     skip the typed confirmation for 'device' (DANGEROUS)\n"
+"  --secure-erase   after a device wipe, issue the drive's firmware secure\n"
+"                   erase (native NVMe Format / ATA via hdparm)\n"
+"  --crypto-erase   like --secure-erase but request cryptographic erase\n"
 "  -v     verbose\n"
 "  -V     print version\n"
 "  -h     help\n\n"
-"Filesystem TRIM (FITRIM) needs root. On SSDs erasure cannot be guaranteed\n"
-"(wear leveling / over-provisioning); nwu maximizes effort by combining\n"
-"overwrite + per-file discard + filesystem TRIM.\n",
-        p, p, p);
+"Filesystem TRIM (FITRIM) and device wipes need root. On SSDs erasure cannot be\n"
+"guaranteed in software (wear leveling / over-provisioning); nwu maximizes effort\n"
+"by combining a non-compressible overwrite (O_DIRECT for big targets) with\n"
+"discard, and points you at the firmware secure erase for a hard guarantee.\n",
+        p, p, p, p);
 }
 
 int main(int argc, char **argv)
 {
     harden_process();   /* no coredumps; non-fatal best-effort */
 
+    static const struct option longopts[] = {
+        { "secure-erase", no_argument, 0, 1000 },
+        { "crypto-erase", no_argument, 0, 1001 },
+        { 0, 0, 0, 0 }
+    };
     int opt;
-    while ((opt = getopt(argc, argv, "p:TcvVh")) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:TcyvVh", longopts, NULL)) != -1) {
         switch (opt) {
         case 'p': g_passes = atoi(optarg); if (g_passes < 1) g_passes = 1; break;
         case 'T': g_do_trim = 0; break;
         case 'c': g_verify = 1; break;
+        case 'y': g_assume_yes = 1; break;
         case 'v': g_verbose = 1; break;
+        case 1000: g_secure_erase = 1; break;       /* --secure-erase */
+        case 1001: g_secure_erase = 2; break;       /* --crypto-erase */
         case 'V': printf("nwu " NWU_VERSION "\n"); return 0;
         case 'h': usage(argv[0]); return 0;
         default:  usage(argv[0]); return 2;
@@ -838,6 +1174,10 @@ int main(int argc, char **argv)
     } else if (!strcmp(cmd, "free")) {
         if (optind >= argc) { usage(argv[0]); return 2; }
         if (wipe_freespace(argv[optind]) < 0) rc = 1;
+    } else if (!strcmp(cmd, "device") || !strcmp(cmd, "dev")) {
+        if (optind >= argc) { usage(argv[0]); return 2; }
+        for (int i = optind; i < argc; i++)
+            if (wipe_device(argv[i]) < 0) rc = 1;
     } else {
         usage(argv[0]);
         return 2;
