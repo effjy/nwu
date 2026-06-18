@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="910" height="96" viewBox="0 0 910 96" role="img" aria-label="Novel Wiping Utility">
+  <title>Novel Wiping Utility</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00FFCC"/>
+      <stop offset="55%" stop-color="#1FB6FF"/>
+      <stop offset="100%" stop-color="#8A2BE2"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g fill="url(#g)" filter="url(#glow)">
+    <path d="M56 0 L56 720 L167 720 L695 92 L695 720 L776 720 L776 0 L665 0 L137 628 L137 0 L56 0 Z" transform="translate(36.00,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M174 0 Q141 0 113 16 Q86 32 70 59 Q54 87 54 120 L54 600 Q54 633 70 660 Q86 688 113 704 Q141 720 174 720 L654 720 Q687 720 714 704 Q742 688 758 660 Q774 633 774 600 L774 120 Q774 87 758 59 Q742 32 714 16 Q687 0 654 0 L174 0 M174 81 L654 81 Q670 81 681 92 Q693 104 693 120 L693 600 Q693 616 681 627 Q670 639 654 639 L174 639 Q158 639 146 627 Q135 616 135 600 L135 120 Q135 104 146 92 Q158 81 174 81 Z" transform="translate(86.46,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M452 0 L452 0 L35 720 L130 720 L499 79 L867 720 L962 720 L546 0 L452 0 Z" transform="translate(136.72,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M58 0 L58 720 L715 720 L715 639 L139 639 L139 401 L602 401 L602 319 L139 319 L139 81 L715 81 L715 0 L58 0 Z" transform="translate(195.91,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M57 0 L57 721 L138 721 L138 81 L777 81 L777 0 L57 0 Z" transform="translate(243.00,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M297 0 L297 0 L35 720 L121 720 L332 142 L542 720 L640 720 L851 142 L1060 720 L1148 720 L886 0 L815 0 L591 615 L367 0 L297 0 Z" transform="translate(319.56,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M66 0 L66 720 L148 720 L148 0 L66 0 Z" transform="translate(387.73,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M56 0 L56 719 L656 719 Q689 719 716 702 Q744 686 760 659 Q776 632 776 599 L776 388 Q776 355 760 328 Q744 301 716 284 Q689 268 656 268 L137 268 L137 0 L56 0 M176 350 L656 350 Q672 350 683 361 Q695 372 695 388 L695 599 Q695 615 683 626 Q672 638 656 638 L176 638 Q160 638 148 626 Q137 615 137 599 L137 388 Q137 372 148 361 Q160 350 176 350 Z" transform="translate(406.66,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M66 0 L66 720 L148 720 L148 0 L66 0 Z" transform="translate(455.03,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M56 0 L56 720 L167 720 L695 92 L695 720 L776 720 L776 0 L665 0 L137 628 L137 0 L56 0 Z" transform="translate(473.95,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M176 0 Q143 0 115 16 Q88 32 72 59 Q56 87 56 120 L56 600 Q56 633 72 660 Q88 688 115 704 Q143 720 176 720 L656 720 Q689 720 716 704 Q744 688 760 660 Q776 633 776 600 L776 571 L695 571 L695 600 Q695 616 683 627 Q672 639 656 639 L176 639 Q160 639 148 627 Q137 616 137 600 L137 120 Q137 104 148 92 Q160 81 176 81 L656 81 Q672 81 683 92 Q695 104 695 120 L695 298 L517 298 L517 380 L776 380 L776 120 Q776 87 760 59 Q744 32 716 16 Q689 0 656 0 L176 0 Z" transform="translate(524.41,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M174 0 Q141 0 113 16 Q86 32 70 59 Q54 87 54 120 L54 720 L135 720 L135 120 Q135 104 146 92 Q158 81 174 81 L654 81 Q670 81 681 92 Q693 104 693 120 L693 720 L774 720 L774 120 Q774 87 758 59 Q742 32 714 16 Q687 0 654 0 L174 0 L174 0 Z" transform="translate(603.57,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M340 0 L340 0 L340 639 L20 639 L20 720 L740 720 L740 639 L421 639 L421 0 L340 0 Z" transform="translate(653.83,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M66 0 L66 720 L148 720 L148 0 L66 0 Z" transform="translate(700.57,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M57 0 L57 721 L138 721 L138 81 L777 81 L777 0 L57 0 Z" transform="translate(719.49,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M66 0 L66 720 L148 720 L148 0 L66 0 Z" transform="translate(767.25,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M340 0 L340 0 L340 639 L20 639 L20 720 L740 720 L740 639 L421 639 L421 0 L340 0 Z" transform="translate(786.17,70.0) scale(0.05104,-0.05104)"/>
+    <path d="M363 0 L363 0 L363 271 L32 720 L125 720 L404 368 L680 720 L775 720 L444 271 L444 0 L363 0 Z" transform="translate(832.90,70.0) scale(0.05104,-0.05104)"/>
+  </g>
+</svg>
