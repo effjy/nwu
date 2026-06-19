@@ -13,11 +13,12 @@
 SSD-aware secure delete and free-space wipe, in C++. Runs as an **interactive
 menu** or from the **command line** for scripting. The novel point is that it
 **combines** logical overwrite with controller-level **discard (TRIM)** in one
-operation, instead of relying on either alone.
+operation, instead of relying on either alone. It also scrubs **free RAM** to
+clear sensitive data left behind in previously-used memory pages.
 
 ## Screenshot
 
-![nwu in action](screenshot.png)
+![nwu in action](screen.png)
 
 ## Why overwriting alone fails on SSDs
 
@@ -63,6 +64,24 @@ auto-reclaims them instead of leaving a giant file behind. A live **progress
 bar** shows percentage, bytes written, throughput, and ETA. When run
 interactively (a TTY), press **`s`** to stop early — nwu still syncs, releases,
 and TRIMs whatever was already written.
+
+**RAM wipe** (`ram`)
+Allocate (almost) all free memory in chunks, **pin each block (`mlock`)** so it
+can't be paged out, and overwrite it with the random stream — scrubbing
+sensitive data (keys, plaintext, decrypted buffers) that a previous process left
+behind in now-freed physical pages. A **safety margin** of free RAM
+(`NWU_RAM_SAFETY_MB`, default 256 MB) is always left so the system stays
+responsive, and the fill stops automatically when it reaches that margin. The
+scrubbed memory stays **pinned and allocated** until you explicitly release it,
+at which point every block is zeroed, unpinned and freed:
+- in the **CLI**, the fill runs, then pressing **Enter** releases the RAM (during
+  the fill, **Ctrl+C** stops allocating but keeps what's already pinned);
+- in the **GUI**, the **RAM** tab has a **Start RAM wipe** and a **Release RAM**
+  button.
+
+This is best-effort: it can only reach memory the kernel will hand to a
+userspace process (not kernel buffers or another process's RAM), and DRAM
+cleared this way still loses residual charge over time on its own.
 
 **The random stream.** Bulk overwrite uses a userspace **ChaCha20** keystream
 seeded once from `getrandom()` (verified against the RFC 8439 test vector). This
@@ -117,8 +136,8 @@ sudo make install          # installs BOTH binaries + icon + desktop entry
 | --------- | ---- |
 | CLI       | `/usr/local/bin/nwu` |
 | GUI       | `/usr/local/bin/nwu-gui` |
-| Icon      | `/usr/local/share/icons/hicolor/scalable/apps/io.github.effjy.nwu.svg` |
-| Launcher  | `/usr/local/share/applications/io.github.effjy.nwu.desktop` |
+| Icon      | `/usr/local/share/icons/hicolor/scalable/apps/nwu.svg` |
+| Launcher  | `/usr/local/share/applications/nwu.desktop` |
 
 The desktop entry + hicolor icon make **nwu-gui** show up in your application
 menu and display its own icon in the window title bar / taskbar. (The install
@@ -151,17 +170,25 @@ nwu-gui          # unprivileged: file/free-space wipes
 sudo nwu-gui     # root: FITRIM, reserved-block fills and whole-device wipes
 ```
 
-The window has a tab for each operation — **File / Folder**, **Free space**, and
-**Device** — plus the shared options (passes, TRIM/discard, read-back verify,
-verbose). It runs the exact same engine as the CLI: every wipe runs on a worker
-thread and the engine's live output (including the progress bar) streams into the
-log pane. Destructive actions pop a confirmation dialog first, and the whole-disk
-**Device** tab is clearly marked and offers the firmware secure-erase options.
+The window has a tab for each operation — **File / Folder**, **Free space**,
+**Device**, and **RAM** — plus the shared options (passes, TRIM/discard,
+read-back verify, verbose) and a **Stop** button to end a running wipe
+gracefully. It runs the exact same engine as the CLI: every wipe runs on a worker
+thread and the engine's live output (including the progress bar, which updates in
+place on a single line) streams into the log pane. Destructive actions pop a
+confirmation dialog first, and the whole-disk **Device** tab is clearly marked
+and offers the firmware secure-erase options. The **RAM** tab has **Start RAM
+wipe** / **Release RAM** buttons. An **About** button shows version and license.
+
+When launched unprivileged, a **Relaunch as root** button re-runs the GUI under
+`pkexec` (forwarding the display environment so the elevated window actually
+appears, and your home directory so the file chooser still opens in your own
+files rather than `/root`).
 
 ## Usage (CLI)
 
 Launch the interactive menu (no arguments) — guides you through wiping a file, a
-directory, or free space, with confirmation prompts:
+directory, free space, a whole device, or **RAM**, with confirmation prompts:
 
 ```sh
 nwu
@@ -173,6 +200,7 @@ Command line (for scripts):
 nwu [-p N] [-T] [-c] [-v] wipe   <path>...    # secure-delete file(s) and/or dir tree(s)
 nwu [-p N] [-T] [-v]      free   <mountpoint> # fill & wipe free space, then TRIM
 nwu [-p N] [-T] [-c] [-y] device <blockdev>   # wipe a WHOLE device + BLKDISCARD (root)
+nwu                       ram                 # scrub free RAM, release on Enter
 ```
 
 **Options**
@@ -200,6 +228,9 @@ sudo nwu wipe ./old-keys/ report.pdf backup.tar
 
 # Wipe the free space on a mounted drive (e.g. a USB stick), then TRIM it
 sudo nwu free /media/usb
+
+# Scrub free RAM (overwrite previously-used memory pages), Enter to release
+nwu ram
 
 # Overwrite 3 times, verbose, no TRIM
 sudo nwu -p 3 -v -T wipe ./sensitive.db
@@ -235,6 +266,17 @@ TRIM step is skipped, which it reports in verbose mode.
 ## Changelog
 
 **Unreleased**
+- New **RAM wipe** (`ram` command, menu option, and a **RAM** tab in the GUI):
+  allocates and pins (`mlock`) almost all free memory and overwrites it with the
+  ChaCha20 stream to scrub data left in previously-used pages, keeping a safety
+  margin so the system stays responsive. The memory stays pinned until released —
+  **Enter** in the CLI (**Ctrl+C** stops the fill but keeps it), **Release RAM**
+  in the GUI; release zeroes, unpins and frees every block.
+- GUI: added a **Stop** button (graceful stop for free-space/device wipes that
+  still syncs, frees the fill files and TRIMs — no leftover fill file), an
+  **About** dialog, file choosers that open in the launching user's home when run
+  via `pkexec`, and a progress bar that updates **in place** on one line instead
+  of scrolling. Renamed the installed icon/launcher to `nwu.svg` / `nwu.desktop`.
 - Ported from C to **C++**, and split into a shared engine (`nwu_core.cpp`) with
   two front-ends that behave identically: the existing CLI (`nwu`) and a new
   **GTK4 GUI** (`nwu-gui`). The GUI runs each wipe on a worker thread and streams

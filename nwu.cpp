@@ -33,10 +33,11 @@ static void interactive(void)
         printf("  2) Wipe a directory (recursive)\n");
         printf("  3) Wipe free space on a mountpoint\n");
         printf("  4) Wipe a whole block device (e.g. /dev/sdX)\n");
-        printf("  5) Settings (passes=%d, trim=%s, verify=%s, verbose=%s)\n",
+        printf("  5) Wipe RAM (scrub free memory, then release)\n");
+        printf("  6) Settings (passes=%d, trim=%s, verify=%s, verbose=%s)\n",
                g_passes, g_do_trim ? "on" : "off", g_verify ? "on" : "off",
                g_verbose ? "on" : "off");
-        printf("  6) Quit\n");
+        printf("  7) Quit\n");
         printf("Choose: ");
         fflush(stdout);
         read_line(line, sizeof line);
@@ -69,6 +70,12 @@ static void interactive(void)
             wipe_device(line);          /* asks its own typed confirmation */
             g_secure_erase = 0;
         } else if (!strcmp(line, "5")) {
+            wipe_ram(NWU_RAM_SAFETY_MB);
+            printf("\nPress Enter to release the scrubbed RAM... ");
+            fflush(stdout);
+            read_line(line, sizeof line);
+            release_ram();
+        } else if (!strcmp(line, "6")) {
             printf("Overwrite passes [%d]: ", g_passes);
             fflush(stdout);
             read_line(line, sizeof line);
@@ -76,7 +83,7 @@ static void interactive(void)
             g_do_trim = confirm("Enable filesystem TRIM / device discard?");
             g_verify  = confirm("Verify overwrite by reading it back?");
             g_verbose = confirm("Enable verbose output?");
-        } else if (!strcmp(line, "6") || !strcmp(line, "q") || !line[0]) {
+        } else if (!strcmp(line, "7") || !strcmp(line, "q") || !line[0]) {
             return;
         } else {
             printf("nwu: unknown choice.\n");
@@ -96,7 +103,8 @@ static void usage(const char *p)
 "Scripting:\n"
 "  %s [opts] wipe   <path>...         wipe file(s) and/or directory tree(s)\n"
 "  %s [opts] free   <mountpoint>      wipe free space, then TRIM\n"
-"  %s [opts] device <blockdev>        wipe a WHOLE device + BLKDISCARD (root)\n\n"
+"  %s [opts] device <blockdev>        wipe a WHOLE device + BLKDISCARD (root)\n"
+"  %s        ram                      scrub free RAM, then release on Enter\n\n"
 "There is also a GTK4 GUI: run 'nwu-gui' (or launch it from your desktop menu).\n\n"
 "Options:\n"
 "  -p N   overwrite passes (default 1; >1 helps only on HDDs)\n"
@@ -113,7 +121,7 @@ static void usage(const char *p)
 "guaranteed in software (wear leveling / over-provisioning); nwu maximizes effort\n"
 "by combining a non-compressible overwrite (O_DIRECT for big targets) with\n"
 "discard, and points you at the firmware secure erase for a hard guarantee.\n",
-        p, p, p, p);
+        p, p, p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -160,6 +168,13 @@ int main(int argc, char **argv)
         if (optind >= argc) { usage(argv[0]); return 2; }
         for (int i = optind; i < argc; i++)
             if (wipe_device(argv[i]) < 0) rc = 1;
+    } else if (!strcmp(cmd, "ram")) {
+        wipe_ram(NWU_RAM_SAFETY_MB);
+        char line[16];
+        printf("\nPress Enter to release the scrubbed RAM... ");
+        fflush(stdout);
+        read_line(line, sizeof line);
+        release_ram();
     } else {
         usage(argv[0]);
         return 2;

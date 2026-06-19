@@ -60,6 +60,8 @@
 #include <sys/mman.h>      /* mlock, munlock */
 #include <sys/prctl.h>     /* prctl, PR_SET_DUMPABLE */
 #include <sys/wait.h>      /* waitpid (hdparm for ATA secure erase) */
+#include <sys/sysinfo.h>   /* sysinfo: free/buffer RAM for the RAM scrub */
+#include <csignal>         /* SIGINT handler so Ctrl+C stops the RAM fill */
 #include <getopt.h>        /* getopt_long for --secure-erase */
 #include <linux/fs.h>      /* FITRIM, BLKDISCARD, BLKGETSIZE64 */
 
@@ -1060,6 +1062,127 @@ int wipe_device(const char *dev)
     if (stopped) printf("nwu: stopped by user (device only partially overwritten).\n");
     if (!erased) print_secure_erase_hint(dev);   /* fall back to manual guidance */
     return rc;
+}
+
+/* ----------------------------------------------------------- RAM scrubbing */
+
+/* Tracks every pinned block so release_ram() can zero/unlock/free them all. */
+typedef struct { void *ptr; size_t size; } ram_block_t;
+static ram_block_t *g_ram_blocks = NULL;
+static size_t g_ram_count = 0, g_ram_cap = 0;
+static unsigned long long g_ram_bytes = 0;
+
+int ram_is_held(void) { return g_ram_count > 0; }
+
+/* Available RAM in MiB: free pages plus reclaimable buffer cache. */
+static unsigned long ram_avail_mb(void)
+{
+    struct sysinfo si;
+    if (sysinfo(&si) != 0) return 0;
+    unsigned long long avail =
+        ((unsigned long long)si.freeram + si.bufferram) * si.mem_unit;
+    return (unsigned long)(avail / (1024ull * 1024ull));
+}
+
+/* Ctrl+C during a CLI RAM fill: stop allocating but KEEP what's pinned. */
+static void ram_sigint(int sig) { (void)sig; g_stop = 1; }
+
+/* Overwrite memory so the compiler can't elide it, before we hand it back. */
+static void ram_zero(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
+
+/* Fill (almost) all free RAM with entropy and keep it pinned. Stops at the
+ * safety margin, on g_stop, or when allocation fails. Does NOT free - the
+ * memory stays scrubbed and pinned until release_ram(). */
+int wipe_ram(unsigned long safety_mb)
+{
+    g_stop = 0;
+    const size_t chunk = 64ull * 1024 * 1024;   /* 64 MiB allocations */
+
+    char mh[32]; human((double)safety_mb * 1024 * 1024, mh, sizeof mh);
+    printf("nwu: scrubbing RAM - overwriting free memory with entropy, "
+           "leaving a %s safety margin.\n", mh);
+    printf("nwu: blocks are pinned (mlock) and filled; release them when done"
+           "%s.\n", isatty(STDIN_FILENO) ? " (Ctrl+C stops, keeps memory)" : "");
+    fflush(stdout);
+
+    void (*prev)(int) = signal(SIGINT, ram_sigint);
+    int warned_mlock = 0;
+
+    for (;;) {
+        if (g_stop) break;
+        unsigned long avail = ram_avail_mb();
+        if (avail <= safety_mb) {
+            fprintf(stderr, "\n");
+            printf("nwu: available %lu MB <= safety margin %lu MB; stopping.\n",
+                   avail, safety_mb);
+            break;
+        }
+
+        size_t want = chunk;
+        unsigned long head_mb = avail - safety_mb;
+        if ((unsigned long long)head_mb * 1024 * 1024 < chunk)
+            want = (size_t)head_mb * 1024 * 1024;
+        if (want == 0) break;
+
+        void *blk = NULL;
+        if (posix_memalign(&blk, 4096, want) != 0) {
+            fprintf(stderr, "\nnwu: RAM allocation stopped: %s\n", strerror(errno));
+            break;
+        }
+        if (mlock(blk, want) != 0 && !warned_mlock) {
+            fprintf(stderr, "\nnwu: warning: mlock failed (%s) - scrubbed RAM "
+                            "may reach swap\n", strerror(errno));
+            warned_mlock = 1;
+        }
+        rng_fill((unsigned char *)blk, want);   /* high-entropy overwrite */
+
+        if (g_ram_count >= g_ram_cap) {
+            size_t ncap = g_ram_cap ? g_ram_cap * 2 : 16;
+            ram_block_t *t =
+                (ram_block_t *)realloc(g_ram_blocks, ncap * sizeof *t);
+            if (!t) { munlock(blk, want); free(blk); break; }
+            g_ram_blocks = t; g_ram_cap = ncap;
+        }
+        g_ram_blocks[g_ram_count].ptr = blk;
+        g_ram_blocks[g_ram_count].size = want;
+        g_ram_count++;
+        g_ram_bytes += want;
+
+        char hb[32]; human((double)g_ram_bytes, hb, sizeof hb);
+        fprintf(stderr, "\rnwu: scrubbed %s in %zu block(s), %lu MB free   ",
+                hb, g_ram_count, avail);
+        fflush(stderr);
+    }
+
+    signal(SIGINT, prev);
+    fputc('\n', stderr);
+    char hb[32]; human((double)g_ram_bytes, hb, sizeof hb);
+    printf("nwu: RAM scrub holding %s across %zu block(s) - pinned until "
+           "released.\n", hb, g_ram_count);
+    fflush(stdout);
+    return 0;
+}
+
+/* Zero, unpin and free every block, returning the RAM to the system. */
+void release_ram(void)
+{
+    size_t n = g_ram_count;
+    for (size_t i = 0; i < g_ram_count; i++) {
+        if (!g_ram_blocks[i].ptr) continue;
+        ram_zero(g_ram_blocks[i].ptr, g_ram_blocks[i].size);
+        munlock(g_ram_blocks[i].ptr, g_ram_blocks[i].size);
+        free(g_ram_blocks[i].ptr);
+    }
+    free(g_ram_blocks);
+    g_ram_blocks = NULL;
+    g_ram_count = g_ram_cap = 0;
+    g_ram_bytes = 0;
+    printf("nwu: released RAM (%zu block(s) zeroed, unpinned and freed).\n", n);
+    fflush(stdout);
 }
 
 /* ------------------------------------------------- shared line input helper */

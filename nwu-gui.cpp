@@ -216,6 +216,7 @@ static void start_job(App *app, int kind, const char *target, int secure_erase)
         case 0: wipe_path(job->target); break;
         case 1: wipe_freespace(job->target); break;
         case 2: wipe_device(job->target); break;
+        case 3: wipe_ram(NWU_RAM_SAFETY_MB); break;
         }
         fflush(stdout); fflush(stderr);
         job->done.store(true);
@@ -294,6 +295,26 @@ static void on_wipe_device(GtkButton *, gpointer data)
     confirm_then_run(app, 2, t, se,
                      "THE ENTIRE BLOCK DEVICE will be overwritten and "
                      "discarded. Every partition and filesystem on it is lost.");
+}
+
+/* ---- RAM scrub: start fills+pins free memory, release gives it back ----- */
+static void on_wipe_ram(GtkButton *, gpointer data)
+{
+    App *app = (App *)data;
+    /* Not destructive to user data (it scrubs free memory), so no confirm. */
+    start_job(app, 3, "", 0);
+}
+
+static void on_release_ram(GtkButton *, gpointer data)
+{
+    App *app = (App *)data;
+    if (!ram_is_held()) {
+        log_append(app, "nwu-gui: no scrubbed RAM is currently held.\n");
+        return;
+    }
+    log_append(app, "nwu-gui: releasing scrubbed RAM...\n");
+    release_ram();   /* zero, unpin, free */
+    log_append(app, "nwu-gui: RAM released.\n");
 }
 
 /* ---- file/folder chooser for the path entry ----------------------------- */
@@ -621,6 +642,38 @@ static void activate(GtkApplication *gapp, gpointer)
         gtk_box_append(GTK_BOX(page), go);
 
         gtk_stack_add_titled(GTK_STACK(stack), page, "device", "Device");
+    }
+
+    /* page 4: RAM ---------------------------------------------------- */
+    {
+        GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+        gtk_widget_set_margin_start(page, 16); gtk_widget_set_margin_end(page, 16);
+        gtk_widget_set_margin_top(page, 8); gtk_widget_set_margin_bottom(page, 8);
+
+        GtkWidget *info = gtk_label_new(
+            "Overwrites free RAM with entropy to scrub data left in "
+            "previously-used memory pages.\nThe memory is pinned (mlock) and "
+            "kept allocated until you press Release. A safety\nmargin of free "
+            "RAM is always left so the system stays responsive.");
+        gtk_label_set_xalign(GTK_LABEL(info), 0.0);
+        gtk_label_set_wrap(GTK_LABEL(info), TRUE);
+        gtk_box_append(GTK_BOX(page), info);
+
+        GtkWidget *brow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        GtkWidget *start = gtk_button_new_with_label("Start RAM wipe");
+        gtk_widget_add_css_class(start, "suggested-action");
+        g_signal_connect(start, "clicked", G_CALLBACK(on_wipe_ram), app);
+        track_button(app, start);   /* disabled while a job runs */
+        gtk_box_append(GTK_BOX(brow), start);
+
+        GtkWidget *rel = gtk_button_new_with_label("Release RAM");
+        g_signal_connect(rel, "clicked", G_CALLBACK(on_release_ram), app);
+        track_button(app, rel);   /* disabled while a job runs: releasing during
+                                   * the fill would race the worker's block list */
+        gtk_box_append(GTK_BOX(brow), rel);
+        gtk_box_append(GTK_BOX(page), brow);
+
+        gtk_stack_add_titled(GTK_STACK(stack), page, "ram", "RAM");
     }
 
     gtk_box_append(GTK_BOX(root), stack);

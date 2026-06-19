@@ -41,6 +41,16 @@ int wipe_path(const char *path);        /* file OR directory tree */
 int wipe_freespace(const char *mount);  /* fill + TRIM free space */
 int wipe_device(const char *dev);       /* whole block device (root) */
 
+/* RAM scrub: allocate (almost) all free memory, pin it (mlock) and overwrite
+ * it with high-entropy bytes, scrubbing data left behind in previously-freed
+ * pages. Keeps a safety margin of free RAM so the system stays responsive.
+ * The memory stays pinned after wipe_ram() returns; call release_ram() to give
+ * it back. ram_is_held() reports whether any scrubbed RAM is still held. */
+#define NWU_RAM_SAFETY_MB 256           /* default free-RAM margin to leave */
+int  wipe_ram(unsigned long safety_mb); /* fill+pin+overwrite free RAM */
+void release_ram(void);                 /* zero, unpin and free it again */
+int  ram_is_held(void);                 /* 1 if scrubbed RAM is still held */
+
 /* Read one line from stdin (newline stripped). Used for confirmations. */
 void read_line(char *buf, size_t n);
 
