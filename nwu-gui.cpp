@@ -466,6 +466,19 @@ static void on_run_as_root(GtkButton *, gpointer data)
 }
 
 /* ---- about dialog ------------------------------------------------------- */
+/* GtkAboutDialog builds its program-name/version/comment labels as selectable
+ * and focuses one on open, so they appear permanently highlighted. Recurse the
+ * widget tree and clear "selectable" on every label - that also drops any
+ * existing selection, so the dialog opens with nothing highlighted. */
+static void unselect_labels(GtkWidget *w)
+{
+    if (GTK_IS_LABEL(w))
+        gtk_label_set_selectable(GTK_LABEL(w), FALSE);
+    for (GtkWidget *c = gtk_widget_get_first_child(w); c;
+         c = gtk_widget_get_next_sibling(c))
+        unselect_labels(c);
+}
+
 static void on_about(GtkButton *, gpointer data)
 {
     App *app = (App *)data;
@@ -484,6 +497,8 @@ static void on_about(GtkButton *, gpointer data)
     gtk_window_set_transient_for(GTK_WINDOW(about), app->win);
     gtk_window_set_modal(GTK_WINDOW(about), TRUE);
     gtk_window_present(GTK_WINDOW(about));
+    unselect_labels(about);                 /* kill the auto-selected highlight */
+    gtk_window_set_focus(GTK_WINDOW(about), NULL);
 }
 
 /* ---- small UI builders -------------------------------------------------- */

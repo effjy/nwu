@@ -2,7 +2,7 @@
    
 <a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
-![version](https://img.shields.io/badge/version-1.4.0-blue)
+![version](https://img.shields.io/badge/version-1.5.0-blue)
 ![language](https://img.shields.io/badge/language-C%2B%2B-00599C?logo=cplusplus)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
@@ -145,7 +145,7 @@ refreshes the icon and desktop databases automatically.)
 
 Verify:
 ```sh
-nwu -V                     # -> nwu 1.4.0
+nwu -V                     # -> nwu 1.5.0
 nwu-gui                    # launches the GTK4 window
 ```
 
@@ -265,7 +265,7 @@ TRIM step is skipped, which it reports in verbose mode.
 
 ## Changelog
 
-**Unreleased**
+**1.5.0**
 - New **RAM wipe** (`ram` command, menu option, and a **RAM** tab in the GUI):
   allocates and pins (`mlock`) almost all free memory and overwrites it with the
   ChaCha20 stream to scrub data left in previously-used pages, keeping a safety
