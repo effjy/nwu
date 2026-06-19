@@ -3,14 +3,14 @@
 <a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
 ![version](https://img.shields.io/badge/version-1.4.0-blue)
-![language](https://img.shields.io/badge/language-C-00599C?logo=c)
+![language](https://img.shields.io/badge/language-C%2B%2B-00599C?logo=cplusplus)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
-SSD-aware secure delete and free-space wipe, in C. Runs as an **interactive
+SSD-aware secure delete and free-space wipe, in C++. Runs as an **interactive
 menu** or from the **command line** for scripting. The novel point is that it
 **combines** logical overwrite with controller-level **discard (TRIM)** in one
 operation, instead of relying on either alone.
@@ -74,52 +74,91 @@ random rename names) come straight from the kernel CSPRNG.
 
 ## Prerequisites
 
-Linux only. You just need a C compiler, `make`, and the standard libc headers —
-nwu has **no third-party dependencies** (it uses only the Linux/glibc APIs:
-`getrandom`, `fallocate`, `FITRIM`, `nftw`, …).
+Linux only. nwu ships **two front-ends** that share one wiping engine:
+
+- **`nwu`** — the command-line tool. **No third-party dependencies** (only the
+  Linux/glibc APIs: `getrandom`, `fallocate`, `FITRIM`, `nftw`, …).
+- **`nwu-gui`** — a **GTK4** desktop GUI. Needs the GTK4 development package.
+
+You need a C++ compiler (C++20: g++ ≥ 10 / clang++ ≥ 10), `make`, the standard
+libc headers, and (for the GUI only) **GTK 4**.
 
 Debian / Ubuntu:
 ```sh
 sudo apt update
-sudo apt install build-essential
+sudo apt install build-essential libgtk-4-dev
 ```
 
 Fedora / RHEL:
 ```sh
-sudo dnf install gcc make glibc-devel
+sudo dnf install gcc-c++ make glibc-devel gtk4-devel
 ```
 
 Arch:
 ```sh
-sudo pacman -S base-devel
+sudo pacman -S base-devel gtk4
 ```
+
+> The CLI builds with no GTK at all — if you only want `nwu`, run `make cli`
+> (skips the GUI and its GTK dependency).
 
 ## Build & install globally
 
 ```sh
 git clone https://github.com/effjy/nwu.git
 cd nwu
-make                       # builds ./nwu
-sudo make install          # installs to /usr/local/bin/nwu (on $PATH)
+make                       # builds ./nwu and ./nwu-gui
+sudo make install          # installs BOTH binaries + icon + desktop entry
 ```
+
+`sudo make install` puts everything in place globally:
+
+| Installed | Path |
+| --------- | ---- |
+| CLI       | `/usr/local/bin/nwu` |
+| GUI       | `/usr/local/bin/nwu-gui` |
+| Icon      | `/usr/local/share/icons/hicolor/scalable/apps/io.github.effjy.nwu.svg` |
+| Launcher  | `/usr/local/share/applications/io.github.effjy.nwu.desktop` |
+
+The desktop entry + hicolor icon make **nwu-gui** show up in your application
+menu and display its own icon in the window title bar / taskbar. (The install
+refreshes the icon and desktop databases automatically.)
 
 Verify:
 ```sh
 nwu -V                     # -> nwu 1.4.0
+nwu-gui                    # launches the GTK4 window
 ```
 
 Uninstall / clean:
 ```sh
-sudo make uninstall        # removes /usr/local/bin/nwu
+sudo make uninstall        # removes both binaries, the icon and the desktop entry
 make clean                 # removes the local build
 ```
 
 Install somewhere else with `PREFIX`:
 ```sh
-make install PREFIX=$HOME/.local      # -> ~/.local/bin/nwu
+make install PREFIX=$HOME/.local      # -> ~/.local/bin/{nwu,nwu-gui}
 ```
 
-## Usage
+## GUI (`nwu-gui`)
+
+Prefer a desktop window? Launch **nwu-gui** from your application menu (it
+installs a `.desktop` entry and icon) or from a terminal:
+
+```sh
+nwu-gui          # unprivileged: file/free-space wipes
+sudo nwu-gui     # root: FITRIM, reserved-block fills and whole-device wipes
+```
+
+The window has a tab for each operation — **File / Folder**, **Free space**, and
+**Device** — plus the shared options (passes, TRIM/discard, read-back verify,
+verbose). It runs the exact same engine as the CLI: every wipe runs on a worker
+thread and the engine's live output (including the progress bar) streams into the
+log pane. Destructive actions pop a confirmation dialog first, and the whole-disk
+**Device** tab is clearly marked and offers the firmware secure-erase options.
+
+## Usage (CLI)
 
 Launch the interactive menu (no arguments) — guides you through wiping a file, a
 directory, or free space, with confirmation prompts:
@@ -194,6 +233,16 @@ TRIM step is skipped, which it reports in verbose mode.
 > instantly renders the *whole* device unrecoverable.
 
 ## Changelog
+
+**Unreleased**
+- Ported from C to **C++**, and split into a shared engine (`nwu_core.cpp`) with
+  two front-ends that behave identically: the existing CLI (`nwu`) and a new
+  **GTK4 GUI** (`nwu-gui`). The GUI runs each wipe on a worker thread and streams
+  the engine's live output into a log pane, with a confirmation dialog before any
+  destructive action. `sudo make install` now installs both binaries plus a
+  **hicolor icon** and a **`.desktop` launcher**, so nwu-gui appears in the
+  application menu with its own taskbar/title-bar icon; `make cli` builds just the
+  dependency-free CLI.
 
 **1.4.0**
 - `--secure-erase` / `--crypto-erase` now **issue the drive's firmware erase**

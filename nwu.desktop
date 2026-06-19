@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=nwu — Novel Wiping Utility
+GenericName=Secure Wiping Utility
+Comment=SSD-aware secure delete and free-space wipe
+Exec=nwu-gui
+Icon=nwu
+Terminal=false
+Categories=System;Utility;Security;
+Keywords=wipe;erase;shred;secure delete;trim;ssd;
+StartupNotify=true
+StartupWMClass=io.github.effjy.nwu
