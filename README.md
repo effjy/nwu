@@ -7,6 +7,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-green)
+![GTK4](https://img.shields.io/badge/GTK-4-4A86CF?logo=gtk&logoColor=white)
 
 </div>
 
