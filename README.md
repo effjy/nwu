@@ -2,7 +2,7 @@
    
 <a href="https://github.com/effjy/nwu/"><img src="titles/novel-wiping-utility-title.svg" height="52" alt="Novel Wiping Utility"></a>
 
-![version](https://img.shields.io/badge/version-1.5.0-blue)
+![version](https://img.shields.io/badge/version-1.6.0-blue)
 ![language](https://img.shields.io/badge/language-C%2B%2B-00599C?logo=cplusplus)
 ![platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
 ![build](https://img.shields.io/badge/build-make-brightgreen)
@@ -251,8 +251,11 @@ sudo nwu --secure-erase device /dev/sdb       # SATA: ATA Secure Erase via hdpar
 ```
 
 > **⚠ `device` erases the entire block device.** It refuses if the device (or any
-> of its partitions) is mounted, and — unless you pass `-y` — makes you type the
-> exact device path to confirm. Double-check with `lsblk` first.
+> of its partitions) is **mounted, in use as swap, or claimed by a stacking layer**
+> (LVM / md-raid / LUKS / device-mapper) — matched by *canonical* path, so a
+> symlinked source (`/dev/disk/by-id/…`, `/dev/mapper/…`) is caught too. Unless you
+> pass `-y` it also makes you type the exact device path to confirm. Double-check
+> with `lsblk` first.
 
 `FITRIM` needs **root** and a discard-capable filesystem/stack. If discard is
 unavailable (an HDD, a VM disk, or an encrypted volume like LUKS mounted without
@@ -265,6 +268,40 @@ TRIM step is skipped, which it reports in verbose mode.
 > instantly renders the *whole* device unrecoverable.
 
 ## Changelog
+
+**1.6.0**
+- **Safer `device` guard.** The "is this device in use?" check no longer relies on
+  a plain `/proc/mounts` substring match. It now canonicalizes the target with
+  `realpath` (so a **symlinked** mount/swap source such as `/dev/disk/by-id/…` or
+  `/dev/mapper/…` is recognized), also refuses a device that is an **active swap**
+  (`/proc/swaps`, which never shows in `/proc/mounts`) or is **claimed by a
+  stacking layer** — LVM PV, md-raid member, LUKS/`device-mapper` backing store —
+  directly or through one of its partitions (sysfs `holders/`). Partition matching
+  is boundary-aware (`sdb` → `sdb1`, `nvme0n1` → `nvme0n1p1`) instead of a loose
+  prefix.
+- **Device read-back verify (`-c`) now reads from the device, not the cache.** The
+  whole-device verify keeps **`O_DIRECT`** on (re-enabling it if the write loop had
+  fallen back to buffered I/O), so the read-back comes straight off the medium —
+  `POSIX_FADV_DONTNEED` is unreliable on block devices. It falls back to
+  cache-eviction only if the device refuses `O_DIRECT`. This also removes a
+  potential spurious `VERIFY FAILED` from unaligned I/O.
+- **Graceful stop no longer discards the whole device.** Hitting **`s`** / **Stop**
+  during a `device` wipe now skips the `BLKDISCARD` over the rest of the device, so
+  the untouched tail is left intact (matching the "only partially overwritten"
+  message) instead of being handed to the controller anyway.
+- **Read-back verify uses a non-zero pattern.** Verification now writes and reads
+  back a fixed non-zero byte (`0xA5`) instead of zeros: a zero read-back can be
+  produced by zero-detecting / sparse / compressing layers without the bytes
+  physically landing, so it proved little. A non-zero constant is a real
+  "the write reached the medium" check.
+- **Progress ETA no longer wraps.** When a fill overshoots the `statvfs` free-space
+  estimate (the FS freed blocks mid-wipe), the remaining-bytes math is clamped, so
+  the final progress line can't print a garbage ETA from an unsigned underflow.
+- **RAM scrub hardening.** The `SIGINT` (Ctrl+C) handler is installed only by the
+  **CLI**; the GUI runs the scrub on a worker thread and stops via its **Stop**
+  button (`g_stop`), so it no longer mutates the process-wide signal disposition
+  off the main thread. Starting a second RAM wipe without releasing now prints a
+  note that previously-pinned RAM is being kept and added to.
 
 **1.5.0**
 - New **RAM wipe** (`ram` command, menu option, and a **RAM** tab in the GUI):

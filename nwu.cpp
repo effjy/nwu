@@ -127,6 +127,7 @@ static void usage(const char *p)
 int main(int argc, char **argv)
 {
     harden_process();   /* no coredumps; non-fatal best-effort */
+    g_handle_sigint = 1; /* CLI: let Ctrl+C stop the RAM fill (keeps it pinned) */
 
     static const struct option longopts[] = {
         { "secure-erase", no_argument, 0, 1000 },

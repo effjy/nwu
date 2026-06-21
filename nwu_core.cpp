@@ -50,6 +50,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <ftw.h>
+#include <dirent.h>        /* opendir: /sys holders scan for device_in_use */
+#include <limits.h>        /* PATH_MAX, realpath */
 #include <poll.h>
 #include <termios.h>
 #include <sys/stat.h>
@@ -86,7 +88,15 @@ int g_do_trim = 1;
 int g_verify  = 0;   /* -c: read-back verification after overwrite */
 int g_assume_yes = 0;/* -y: skip the typed device-wipe confirmation */
 int g_secure_erase = 0; /* 0 none, 1 user-data erase, 2 crypto erase */
+int g_handle_sigint = 0; /* CLI sets 1: install a SIGINT handler in wipe_ram */
 volatile int g_stop = 0; /* set by a front-end to request a graceful stop */
+
+/* Read-back verification pattern. A fixed NON-ZERO byte, not zeros: a zero fill
+ * can be returned trivially by zero-detecting/sparse layers (or a compressing
+ * SSD controller) without the bytes physically landing, so a zero read-back
+ * proves little. A non-zero constant we wrote and read identically is a real
+ * "the write reached the medium" check. */
+#define VERIFY_BYTE 0xA5u
 
 static void vlog(const char *fmt, ...)
 {
@@ -359,15 +369,17 @@ static int overwrite_pass(int fd, off_t size, unsigned char *buf)
 }
 
 /* Read-back verification (DoD 5200.28 style "last pass verify"): write a known
- * pattern (zeros), flush it to the device, drop the cache, then read it back and
- * confirm every byte landed. Proves the sectors are actually writable and that
- * the final on-device state is what we intended - not just dirtied in RAM.
+ * non-zero pattern (VERIFY_BYTE), flush it to the device, drop the cache, then
+ * read it back and confirm every byte landed. Proves the sectors are actually
+ * writable and that the final on-device state is what we intended - not just
+ * dirtied in RAM. A non-zero pattern is used on purpose: zeros can be returned
+ * by zero-detecting/sparse/compressing layers without physically landing.
  * Returns 0 on success, -1 on I/O error, 1 on a verification MISMATCH. */
 static int verify_pass(int fd, off_t size, unsigned char *buf)
 {
     /* write the known pattern */
     if (lseek(fd, 0, SEEK_SET) < 0) return -1;
-    memset(buf, 0, BUFSZ);
+    memset(buf, VERIFY_BYTE, BUFSZ);
     off_t left = size;
     while (left > 0) {
         size_t chunk = (left < (off_t)BUFSZ) ? (size_t)left : BUFSZ;
@@ -396,7 +408,7 @@ static int verify_pass(int fd, off_t size, unsigned char *buf)
             r += (size_t)k;
         }
         for (size_t i = 0; i < chunk; i++)
-            if (buf[i] != 0) return 1;            /* a byte did not stick */
+            if (buf[i] != VERIFY_BYTE) return 1;  /* a byte did not stick */
         left -= (off_t)chunk;
     }
     return 0;
@@ -602,7 +614,11 @@ static void draw_progress(unsigned long long done, unsigned long long total,
     int filled = (int)(frac * width);
 
     double speed = elapsed > 0 ? done / elapsed : 0;          /* B/s */
-    double eta = speed > 0 ? (total - done) / speed : 0;       /* s   */
+    /* done can exceed total (the FS had more free space than statvfs reported,
+     * so the fill overshot the estimate). Clamp instead of letting the unsigned
+     * subtraction wrap into a garbage ETA. */
+    double remaining = (total > done) ? (double)(total - done) : 0.0;
+    double eta = speed > 0 ? remaining / speed : 0;            /* s   */
 
     char sp[32], spd[32];
     human(done, sp, sizeof sp);
@@ -817,21 +833,92 @@ static int blockdev_geom(int fd, unsigned long long *size, unsigned *bsz)
     return 0;
 }
 
-/* Refuse if the device (or one of its partitions) is currently mounted. */
+/* Does the mount/swap source `src` refer to canonical device `cdev` (or one of
+ * its partitions)? Resolves `src` through realpath first so a symlinked source
+ * (/dev/disk/by-uuid/..., /dev/mapper/..., /dev/disk/by-id/...) still matches.
+ * A partition match requires the next char after the device name to be a digit
+ * or 'p' (sdb -> sdb1, nvme0n1 -> nvme0n1p1), not just any prefix. */
+static int same_device(const char *src, const char *cdev, size_t cl)
+{
+    char rp[PATH_MAX];
+    const char *s = realpath(src, rp) ? rp : src;
+    if (strncmp(s, cdev, cl) != 0) return 0;
+    char c = s[cl];
+    if (c == 0) return 1;                              /* exact device */
+    return (c >= '0' && c <= '9') || c == 'p';          /* a partition of it */
+}
+
+/* True if a sysfs holders/ directory has at least one entry (the device is
+ * claimed by device-mapper / LVM / md-raid / LUKS, etc.). */
+static int dir_has_entries(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    struct dirent *e;
+    int held = 0;
+    while ((e = readdir(d)))
+        if (e->d_name[0] != '.') { held = 1; break; }
+    closedir(d);
+    return held;
+}
+
+/* Refuse if the device is in use: mounted, an active swap, or claimed by a
+ * stacking layer (LVM/md/LUKS/device-mapper) - directly or via a partition.
+ * Matches by canonical path, so symlinked sources are caught too. */
 static int device_in_use(const char *dev)
 {
+    char canon[PATH_MAX];
+    const char *cdev = realpath(dev, canon) ? canon : dev;
+    size_t cl = strlen(cdev);
+
+    /* 1. mounted filesystems */
     FILE *f = fopen("/proc/mounts", "r");
-    if (!f) return 0;
-    size_t dl = strlen(dev);
-    char line[8192], src[4096];
-    int found = 0;
-    while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "%4095s", src) == 1 && strncmp(src, dev, dl) == 0) {
-            found = 1; break;
+    if (f) {
+        char line[8192], src[4096];
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "%4095s", src) == 1 && same_device(src, cdev, cl)) {
+                fclose(f); return 1;
+            }
         }
+        fclose(f);
     }
-    fclose(f);
-    return found;
+
+    /* 2. active swap (swap devices never appear in /proc/mounts) */
+    f = fopen("/proc/swaps", "r");
+    if (f) {
+        char line[8192], src[4096];
+        if (fgets(line, sizeof line, f)) {            /* skip the header row */
+            while (fgets(line, sizeof line, f)) {
+                if (sscanf(line, "%4095s", src) == 1 && same_device(src, cdev, cl)) {
+                    fclose(f); return 1;
+                }
+            }
+        }
+        fclose(f);
+    }
+
+    /* 3. claimed by a stacking layer (holders): the device itself, or any of
+     * its partitions used as an LVM PV / md member / LUKS backing device. */
+    const char *base = strrchr(cdev, '/');
+    base = base ? base + 1 : cdev;
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "/sys/class/block/%s/holders", base);
+    if (dir_has_entries(path)) return 1;
+
+    snprintf(path, sizeof path, "/sys/block/%s", base);
+    DIR *d = opendir(path);
+    if (d) {
+        size_t bl = strlen(base);
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, base, bl) != 0) continue;   /* a partition */
+            char ph[PATH_MAX];
+            snprintf(ph, sizeof ph, "/sys/block/%s/%s/holders", base, e->d_name);
+            if (dir_has_entries(ph)) { closedir(d); return 1; }
+        }
+        closedir(d);
+    }
+    return 0;
 }
 
 /* Tell the operator the firmware-level secure-erase command for their drive.
@@ -1031,6 +1118,13 @@ int wipe_device(const char *dev)
 
     if (rc == 0 && !stopped && g_verify) {
         printf("nwu: verifying device (read-back)...\n");
+        /* Read the data back from the DEVICE, not the page cache. The whole-
+         * device size is block-aligned, so O_DIRECT keeps verify_pass's I/O
+         * aligned AND guarantees the read bypasses the cache (POSIX_FADV_DONTNEED
+         * is unreliable on block devices). Re-enable it in case the write loop
+         * fell back to buffered I/O; only if the device refuses O_DIRECT do we
+         * drop to cache-eviction. */
+        if (!try_set_odirect(fd)) clear_odirect(fd);
         int v = verify_pass(fd, (off_t)size, buf);
         if (v < 0) { fprintf(stderr, "nwu: verify %s: %s\n", dev, strerror(errno)); rc = -1; }
         else if (v > 0) { fprintf(stderr, "nwu: VERIFY FAILED on %s\n", dev); rc = -1; }
@@ -1038,7 +1132,9 @@ int wipe_device(const char *dev)
     }
     locked_free(buf, BUFSZ);
 
-    if (g_do_trim) {
+    /* Don't discard a device the user aborted: a graceful stop should leave the
+     * untouched tail intact, not hand the whole device to the controller. */
+    if (g_do_trim && !stopped) {
         uint64_t range[2] = { 0, size };
         if (ioctl(fd, BLKDISCARD, &range) < 0)
             vlog("  BLKDISCARD(%s): %s (device may not support discard)\n",
@@ -1102,14 +1198,29 @@ int wipe_ram(unsigned long safety_mb)
     g_stop = 0;
     const size_t chunk = 64ull * 1024 * 1024;   /* 64 MiB allocations */
 
+    /* A second start without releasing keeps the already-pinned blocks and adds
+     * more on top - tell the operator so it isn't a surprise that RAM stays held. */
+    if (g_ram_count > 0) {
+        char hh[32]; human((double)g_ram_bytes, hh, sizeof hh);
+        printf("nwu: note: already holding %s of scrubbed RAM in %zu block(s); "
+               "adding more (Release frees it all).\n", hh, g_ram_count);
+    }
+
+    /* Ctrl+C handling is a CLI convenience: only the CLI sets g_handle_sigint.
+     * The GUI runs this on a worker thread and stops via the Stop button
+     * (g_stop), so it must not touch the process-wide SIGINT disposition. */
+    int handle_sig = g_handle_sigint;
+
     char mh[32]; human((double)safety_mb * 1024 * 1024, mh, sizeof mh);
     printf("nwu: scrubbing RAM - overwriting free memory with entropy, "
            "leaving a %s safety margin.\n", mh);
     printf("nwu: blocks are pinned (mlock) and filled; release them when done"
-           "%s.\n", isatty(STDIN_FILENO) ? " (Ctrl+C stops, keeps memory)" : "");
+           "%s.\n", (handle_sig && isatty(STDIN_FILENO))
+                    ? " (Ctrl+C stops, keeps memory)" : "");
     fflush(stdout);
 
-    void (*prev)(int) = signal(SIGINT, ram_sigint);
+    void (*prev)(int) = SIG_ERR;
+    if (handle_sig) prev = signal(SIGINT, ram_sigint);
     int warned_mlock = 0;
 
     for (;;) {
@@ -1158,7 +1269,7 @@ int wipe_ram(unsigned long safety_mb)
         fflush(stderr);
     }
 
-    signal(SIGINT, prev);
+    if (handle_sig && prev != SIG_ERR) signal(SIGINT, prev);
     fputc('\n', stderr);
     char hb[32]; human((double)g_ram_bytes, hb, sizeof hb);
     printf("nwu: RAM scrub holding %s across %zu block(s) - pinned until "

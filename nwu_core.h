@@ -10,7 +10,7 @@
 
 #include <cstddef>
 
-#define NWU_VERSION "1.5.0"
+#define NWU_VERSION "1.6.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +23,11 @@ extern int g_do_trim;      /* issue FITRIM / BLKDISCARD */
 extern int g_verify;       /* read-back verification after overwrite */
 extern int g_assume_yes;   /* skip the typed device-wipe confirmation */
 extern int g_secure_erase; /* 0 none, 1 user-data erase, 2 crypto erase */
+
+/* Set by the CLI front-end (1) so the RAM scrub installs a SIGINT handler for
+ * Ctrl+C. Left 0 by the GUI, which stops via the Stop button (g_stop) instead
+ * and must not have a worker thread mutate the process-wide signal handlers. */
+extern int g_handle_sigint;
 
 /* Cooperative stop flag. A front-end sets it (e.g. a GUI "Stop" button) to ask
  * an in-progress free-space or device wipe to finish gracefully: the loop
