@@ -19,7 +19,7 @@ clear sensitive data left behind in previously-used memory pages.
 
 ## Screenshot
 
-![nwu in action](screen.png)
+![nwu in action](screenshot.png)
 
 ## Why overwriting alone fails on SSDs
 
